@@ -12,7 +12,7 @@ Requirements:
 Features:
     - Settings dialog with persistent options (root scan folder, VS Code binary path).
     - Recursively scans for *.code-workspace files under the root folder.
-    - Displays list (table) of workspaces with name, description, path, modified time.
+    - Shows a list of workspace names on the left and a details pane on the right (path + description).
     - Single‑click shows details and enables "Open".
     - Double‑click (or Open button) launches workspace in VS Code.
     - "Add" lets you create a new project folder + prefilled .code-workspace, then opens it in VS Code.
@@ -152,9 +152,7 @@ class WorkspaceScanner:
         return WorkspaceInfo(name=name, path=ws_path, description=desc, mtime=mtime)
 
 
-class WorkspaceTableModel(QtCore.QAbstractTableModel):
-    HEADERS = ["Name", "Description", "Path", "Modified"]
-
+class WorkspaceListModel(QtCore.QAbstractListModel):
     def __init__(self, rows: List[WorkspaceInfo]):
         super().__init__()
         self.rows = rows
@@ -162,28 +160,12 @@ class WorkspaceTableModel(QtCore.QAbstractTableModel):
     def rowCount(self, parent=QtCore.QModelIndex()):
         return len(self.rows)
 
-    def columnCount(self, parent=QtCore.QModelIndex()):
-        return len(self.HEADERS)
-
-    def headerData(self, section, orientation, role=QtCore.Qt.ItemDataRole.DisplayRole):
-        if role == QtCore.Qt.ItemDataRole.DisplayRole and orientation == QtCore.Qt.Orientation.Horizontal:
-            return self.HEADERS[section]
-        return None
-
     def data(self, index, role=QtCore.Qt.ItemDataRole.DisplayRole):
         if not index.isValid():
             return None
         row = self.rows[index.row()]
-        col = index.column()
         if role == QtCore.Qt.ItemDataRole.DisplayRole:
-            if col == 0:
-                return row.name
-            elif col == 1:
-                return row.description
-            elif col == 2:
-                return str(row.path)
-            elif col == 3:
-                return row.mtime_dt.strftime("%Y-%m-%d %H:%M")
+            return row.name
         if role == QtCore.Qt.ItemDataRole.ToolTipRole:
             return str(row.path)
         return None
@@ -274,32 +256,43 @@ class MainWindow(QtWidgets.QMainWindow):
         toolbar.addSeparator()
         toolbar.addAction(act_add)
 
-        self.table = QtWidgets.QTableView()
-        self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
-        self.table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
-        self.table.doubleClicked.connect(self.on_open_selected)
-        self.table.setSortingEnabled(True)
-        ws_layout.addWidget(self.table)
+        # Split view: left list of workspaces, right details
+        split = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
 
-        # Details panel
+        left = QtWidgets.QWidget(); left_layout = QtWidgets.QVBoxLayout(left)
+        self.ws_list = QtWidgets.QListView()
+        self.ws_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        self.ws_list.doubleClicked.connect(self.on_open_selected)
+        left_layout.addWidget(self.ws_list)
+        split.addWidget(left)
+
+        right = QtWidgets.QWidget(); right_layout = QtWidgets.QVBoxLayout(right)
         details = QtWidgets.QGroupBox("Details")
         form = QtWidgets.QFormLayout(details)
         self.lbl_name = QtWidgets.QLabel("–")
         self.lbl_path = QtWidgets.QLabel("–"); self.lbl_path.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.txt_desc = QtWidgets.QPlainTextEdit(); self.txt_desc.setReadOnly(True); self.txt_desc.setFixedHeight(80)
+        self.txt_desc = QtWidgets.QPlainTextEdit(); self.txt_desc.setReadOnly(True); self.txt_desc.setFixedHeight(120)
         form.addRow("Name:", self.lbl_name)
         form.addRow("Path:", self.lbl_path)
         form.addRow("Description:", self.txt_desc)
-        ws_layout.addWidget(details)
+        right_layout.addWidget(details)
 
         self.btn_open = QtWidgets.QPushButton("Open in VS Code")
         self.btn_open.setEnabled(False)
         self.btn_open.clicked.connect(self.on_open_selected)
-        ws_layout.addWidget(self.btn_open)
+        right_layout.addWidget(self.btn_open)
+        right_layout.addStretch(1)
+
+        split.addWidget(right)
+        split.setStretchFactor(0, 1)
+        split.setStretchFactor(1, 1)
+
+        ws_layout.addWidget(split)
 
         # Connect selection change to show details
-        sel_model = self.table.selectionModel()
-        # selectionModel isn't ready until model is set; we'll reconnect in set_model
+        # (selection model will be available after setting model below)
+
+        tabs.addTab(ws_widget, "Workspaces")
 
         # Tab 2: Folders
         folders_widget = QtWidgets.QWidget()
@@ -347,9 +340,9 @@ class MainWindow(QtWidgets.QMainWindow):
             pass
 
         # Initial data
-        self.model = WorkspaceTableModel([])
-        self.table.setModel(self.model)
-        self.table.selectionModel().selectionChanged.connect(self.on_row_selected)
+        self.ws_model = WorkspaceListModel([])
+        self.ws_list.setModel(self.ws_model)
+        self.ws_list.selectionModel().selectionChanged.connect(self.on_row_selected)
         self.refresh()
 
     # --- Utilities ---
@@ -392,12 +385,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def refresh(self):
         scanner = WorkspaceScanner(self.settings.root_folder)
         rows = scanner.scan()
-        self.model.update_rows(rows)
-        # Guard against rare race where view might be deleted during refresh
-        try:
-            self.table.resizeColumnsToContents()
-        except RuntimeError:
-            return
+        self.ws_model.update_rows(rows)
         self.status.showMessage(f"Found {len(rows)} workspaces under {self.settings.root_folder}")
 
         # adjust tree root for both modes
@@ -423,27 +411,28 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_open.setEnabled(False)
 
     def on_row_selected(self):
-        idxs = self.table.selectionModel().selectedRows()
+        idxs = self.ws_list.selectionModel().selectedIndexes()
         if not idxs:
             self.btn_open.setEnabled(False)
             return
         idx = idxs[0]
-        ws = self.model.workspace_at(idx.row())
+        ws = self.ws_model.workspace_at(idx.row())
         self.lbl_name.setText(ws.name)
         self.lbl_path.setText(str(ws.path))
         self.txt_desc.setPlainText(ws.description or "")
         self.btn_open.setEnabled(True)
 
     def on_open_selected(self):
-        idxs = self.table.selectionModel().selectedRows()
+        idxs = self.ws_list.selectionModel().selectedIndexes()
         if not idxs:
             return
-        ws = self.model.workspace_at(idxs[0].row())
+        ws = self.ws_model.workspace_at(idxs[0].row())
         ok, msg = self._launch_code([str(ws.path)])
         self.status.showMessage(msg, 5000)
         if not ok:
             QtWidgets.QMessageBox.warning(self, "Error", msg)
 
+    
     def on_settings(self):
         dlg = SettingsDialog(self.settings, self)
         if dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted:
