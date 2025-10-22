@@ -45,9 +45,7 @@ except Exception:
 
 from platformdirs import user_config_dir
 
-from pathlib import Path
-import sys
-from PyQt6 import QtCore, QtGui, QtWidgets
+# (duplicates removed) these were already imported above
 
 def _assets_base() -> Path:
     # PyInstaller support (sys._MEIPASS)
@@ -139,9 +137,20 @@ class WorkspaceInfo:
     description: str
     mtime: float
     tags: List[str] = field(default_factory=list)
+    # Cached lowercase fields for fast filtering
+    name_l: str = field(init=False, repr=False)
+    path_l: str = field(init=False, repr=False)
+    desc_l: str = field(init=False, repr=False)
+    tags_l: List[str] = field(init=False, repr=False)
 
     def mtime_dt(self) -> datetime:
         return datetime.fromtimestamp(self.mtime)
+
+    def __post_init__(self):
+        self.name_l = (self.name or "").lower()
+        self.path_l = str(self.path).lower()
+        self.desc_l = (self.description or "").lower()
+        self.tags_l = [t.lower() for t in (self.tags or [])]
 
 
 # ----------------------------- Settings I/O -----------------------------
@@ -163,17 +172,43 @@ def save_settings(settings: Settings) -> None:
 # ----------------------------- Utils -----------------------------
 
 def which_code(custom: Optional[Path]) -> Optional[str]:
-    if custom and custom.exists():
-        return str(custom)
+    if custom:
+        p = Path(custom)
+        if p.exists():
+            return str(p)
+
+    # Windows-first search
+    if sys.platform.startswith("win"):
+        local = Path(os.environ.get("LOCALAPPDATA", ""))
+        program_files = Path(os.environ.get("ProgramFiles", r"C:\\Program Files"))
+        program_files_x86 = Path(os.environ.get("ProgramFiles(x86)", r"C:\\Program Files (x86)"))
+        win_candidates = [
+            local / "Programs" / "Microsoft VS Code" / "Code.exe",
+            local / "Programs" / "Microsoft VS Code Insiders" / "Code - Insiders.exe",
+            program_files / "Microsoft VS Code" / "Code.exe",
+            program_files_x86 / "Microsoft VS Code" / "Code.exe",
+            # CLI scripts (fallback)
+            local / "Programs" / "Microsoft VS Code" / "bin" / "code.cmd",
+            program_files / "Microsoft VS Code" / "bin" / "code.cmd",
+            program_files_x86 / "Microsoft VS Code" / "bin" / "code.cmd",
+        ]
+        for c in win_candidates:
+            try:
+                if c and c.exists():
+                    return str(c)
+            except Exception:
+                pass
+        # Finally, PATH
+        found = shutil.which("code") or shutil.which("Code.exe")
+        if found:
+            return found
+        return None
+
+    # Non-Windows
     found = shutil.which("code")
     if found:
         return found
-    # Typical extra places
-    candidates = [
-        "/usr/bin/code",
-        "/snap/bin/code",
-        str(Path.home() / "AppData/Local/Programs/Microsoft VS Code/bin/code.cmd"),
-    ]
+    candidates = ["/usr/bin/code", "/snap/bin/code"]
     for c in candidates:
         if Path(c).exists():
             return c
@@ -257,7 +292,7 @@ class WorkspaceFilterProxyModel(QtCore.QSortFilterProxyModel):
         # Text pattern
         if self._pattern:
             pat = self._pattern
-            if not (pat in ws.name.lower() or pat in (ws.description or "").lower() or pat in str(ws.path).lower()):
+            if not (pat in ws.name_l or pat in ws.desc_l or pat in ws.path_l):
                 return False
         # Mode filter
         if self._mode == "Pinned" and str(ws.path) not in self._pinned:
@@ -266,8 +301,7 @@ class WorkspaceFilterProxyModel(QtCore.QSortFilterProxyModel):
             return False
         # Tag filter
         if self._tag:
-            tags_l = [t.lower() for t in (ws.tags or [])]
-            if self._tag.lower() not in tags_l:
+            if self._tag.lower() not in ws.tags_l:
                 return False
         return True
 
@@ -283,7 +317,11 @@ class ScanWorker(QtCore.QObject):
         self.root = Path(root)
         self.gen = generation
         self._cancel = False
-        self._skip_dirs = {".git", ".hg", ".svn", "node_modules", "venv", ".tox", ".mypy_cache"}
+        self._skip_dirs = {
+            ".git", ".hg", ".svn",
+            "node_modules", "venv", ".venv", ".tox", ".mypy_cache", "__pycache__",
+            ".vs", ".idea", "out", "build", "dist"
+        }
 
     @QtCore.pyqtSlot()
     def run(self):
@@ -296,7 +334,13 @@ class ScanWorker(QtCore.QObject):
             for dirpath, dirnames, filenames in os.walk(self.root):
                 # prune heavy/irrelevant dirs
                 dirnames[:] = [d for d in dirnames if d not in self._skip_dirs]
+                if self._cancel:
+                    self.finished.emit([], self.gen)
+                    return
                 for name in filenames:
+                    if self._cancel:
+                        self.finished.emit([], self.gen)
+                        return
                     if name.endswith(SUPPORTED_EXT):
                         p = Path(dirpath) / name
                         try:
@@ -911,9 +955,21 @@ class MainWindow(QtWidgets.QMainWindow):
         if not exe:
             return False, "VS Code CLI not found. Set path in Settings."
         try:
-            # Use Popen without waiting
-            subprocess.Popen([exe] + args)
-            return True, f"Launched: {shlex.join([exe] + args)}"
+            # Prefer reusing window for snappier UX
+            launch_args = ["--reuse-window"] + list(args)
+
+            # Handle .cmd/.bat on Windows via cmd /c
+            if sys.platform.startswith("win") and exe.lower().endswith((".cmd", ".bat")):
+                cmdline = ["cmd", "/c", exe] + launch_args
+                subprocess.Popen(cmdline)
+                msg = "Launched: " + " ".join(cmdline)
+            else:
+                subprocess.Popen([exe] + launch_args)
+                try:
+                    msg = f"Launched: {shlex.join([exe] + launch_args)}"
+                except Exception:
+                    msg = "Launched VS Code"
+            return True, msg
         except Exception as e:
             return False, f"Failed to launch VS Code: {e}"
 
