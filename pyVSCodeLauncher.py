@@ -190,6 +190,83 @@ class WorkspaceListModel(QtCore.QAbstractListModel):
         self.endResetModel()
 
 
+class WorkspaceFilterProxyModel(QtCore.QSortFilterProxyModel):
+    def __init__(self):
+        super().__init__()
+        self._pattern = ""
+        self.setFilterCaseSensitivity(QtCore.Qt.CaseSensitivity.CaseInsensitive)
+
+    @QtCore.pyqtSlot(str)
+    def setFilterText(self, text: str):
+        self._pattern = (text or "").strip().lower()
+        self.invalidateFilter()
+
+    def filterAcceptsRow(self, source_row: int, source_parent: QtCore.QModelIndex) -> bool:
+        if not self._pattern:
+            return True
+        src: WorkspaceListModel = self.sourceModel()  # type: ignore
+        if not src or source_row < 0 or source_row >= src.rowCount():
+            return True
+        ws = src.workspace_at(source_row)
+        pat = self._pattern
+        return (
+            pat in ws.name.lower()
+            or pat in (ws.description or "").lower()
+            or pat in str(ws.path).lower()
+        )
+
+
+class ScanWorker(QtCore.QObject):
+    finished = QtCore.pyqtSignal(list, int)  # rows, generation
+    error = QtCore.pyqtSignal(str, int)      # message, generation
+
+    def __init__(self, root: Path, generation: int):
+        super().__init__()
+        self.root = Path(root)
+        self.gen = generation
+        self._cancel = False
+        self._skip_dirs = {".git", ".hg", ".svn", "node_modules", "venv", ".tox", ".mypy_cache"}
+
+    @QtCore.pyqtSlot()
+    def run(self):
+        try:
+            if not self.root.exists():
+                self.finished.emit([], self.gen)
+                return
+            rows: List[WorkspaceInfo] = []
+            for dirpath, dirnames, filenames in os.walk(self.root):
+                # prune heavy/irrelevant dirs
+                dirnames[:] = [d for d in dirnames if d not in self._skip_dirs]
+                for name in filenames:
+                    if name.endswith(SUPPORTED_EXT):
+                        p = Path(dirpath) / name
+                        try:
+                            text = p.read_text(encoding="utf-8")
+                            data = json.loads(text)
+                            desc = ""
+                            if isinstance(data, dict):
+                                meta = data.get("meta")
+                                if isinstance(meta, dict):
+                                    desc = str(meta.get("description", ""))
+                                if not desc:
+                                    desc = str(data.get("description", ""))
+                            rows.append(WorkspaceInfo(name=p.stem, path=p, description=desc, mtime=p.stat().st_mtime))
+                        except Exception:
+                            continue
+                if self._cancel:
+                    # return empty to avoid overriding newer scans
+                    self.finished.emit([], self.gen)
+                    return
+            rows.sort(key=lambda w: (w.name.lower(), str(w.path).lower()))
+            self.finished.emit(rows, self.gen)
+        except Exception as e:
+            self.error.emit(str(e), self.gen)
+
+    @QtCore.pyqtSlot()
+    def cancel(self):
+        self._cancel = True
+
+
 class SettingsDialog(QtWidgets.QDialog):
     def __init__(self, settings: Settings, parent=None):
         super().__init__(parent)
@@ -284,6 +361,14 @@ class MainWindow(QtWidgets.QMainWindow):
         split = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
 
         left = QtWidgets.QWidget(); left_layout = QtWidgets.QVBoxLayout(left)
+        # Live search box
+        self.search_edit = QtWidgets.QLineEdit(); self.search_edit.setPlaceholderText("Filter by name, path, or description…")
+        try:
+            self.search_edit.setClearButtonEnabled(True)
+        except Exception:
+            pass
+        left_layout.addWidget(self.search_edit)
+
         self.ws_list = QtWidgets.QListView()
         self.ws_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
         self.ws_list.doubleClicked.connect(self.on_open_selected)
@@ -372,11 +457,29 @@ class MainWindow(QtWidgets.QMainWindow):
             self.status.addPermanentWidget(self.mode_label)
         except Exception:
             pass
+        # Progress bar for async scan
+        self.scan_progress = QtWidgets.QProgressBar()
+        self.scan_progress.setFixedWidth(140)
+        self.scan_progress.setTextVisible(False)
+        self.scan_progress.setVisible(False)
+        try:
+            self.status.addPermanentWidget(self.scan_progress)
+        except Exception:
+            pass
 
         # Initial data
         self.ws_model = WorkspaceListModel([])
-        self.ws_list.setModel(self.ws_model)
+        self.ws_proxy = WorkspaceFilterProxyModel()
+        self.ws_proxy.setSourceModel(self.ws_model)
+        self.ws_list.setModel(self.ws_proxy)
         self.ws_list.selectionModel().selectionChanged.connect(self.on_row_selected)
+        self.search_edit.textChanged.connect(self.ws_proxy.setFilterText)
+
+        # Async scan state
+        self._scan_gen = 0
+        self._scan_thread = None
+        self._scan_worker = None
+
         self.refresh()
 
     # --- Utilities ---
@@ -417,21 +520,17 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # --- Actions ---
     def refresh(self):
-        scanner = WorkspaceScanner(self.settings.root_folder)
-        rows = scanner.scan()
-        self.ws_model.update_rows(rows)
-        self.status.showMessage(f"Found {len(rows)} workspaces under {self.settings.root_folder}")
-
-        # adjust tree root for both modes
+        # Adjust tree root for both modes immediately (reflect settings changes)
         if getattr(self, "folder_model_mode", "qfile") == "qfile":
             try:
                 self.fs_model.setRootPath(str(self.settings.root_folder))
                 self.tree.setRootIndex(self.fs_model.index(str(self.settings.root_folder)))
+                self.tree.setColumnWidth(0, self.settings.folders_column_width)
+                self.tree.setColumnWidth(1, max(120, int(self.settings.folders_column_width * 0.5)))
             except Exception:
                 pass
         else:
             self.populate_manual_tree(str(self.settings.root_folder))
-            # ensure minimum width in fallback, since only one column is shown
             try:
                 self.tree.setMinimumWidth(self.settings.folders_column_width)
             except Exception:
@@ -449,13 +548,75 @@ class MainWindow(QtWidgets.QMainWindow):
         self.txt_desc.setPlainText("")
         self.btn_open.setEnabled(False)
 
+        # Start async scan
+        self.start_scan()
+
+    def set_scanning(self, on: bool):
+        try:
+            if on:
+                self.scan_progress.setVisible(True)
+                self.scan_progress.setRange(0, 0)  # busy
+                self.status.showMessage("Scanning workspaces…")
+            else:
+                self.scan_progress.setVisible(False)
+                self.scan_progress.setRange(0, 1)
+        except Exception:
+            pass
+
+    def start_scan(self):
+        # cancel previous worker if any
+        try:
+            if getattr(self, "_scan_worker", None) is not None:
+                self._scan_worker.cancel()
+        except Exception:
+            pass
+        self._scan_gen = getattr(self, "_scan_gen", 0) + 1
+        gen = self._scan_gen
+        self.set_scanning(True)
+        thread = QtCore.QThread(self)
+        worker = ScanWorker(self.settings.root_folder, gen)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self.on_scan_finished)
+        worker.error.connect(self.on_scan_error)
+        worker.finished.connect(lambda *_: thread.quit())
+        worker.finished.connect(lambda *_: worker.deleteLater())
+        thread.finished.connect(thread.deleteLater)
+        thread.start()
+        self._scan_thread = thread
+        self._scan_worker = worker
+
+    @QtCore.pyqtSlot(list, int)
+    def on_scan_finished(self, rows: List[WorkspaceInfo], gen: int):
+        if gen != getattr(self, "_scan_gen", 0):
+            # stale result
+            return
+        self.ws_model.update_rows(rows)
+        try:
+            self.status.showMessage(f"Found {len(rows)} workspaces under {self.settings.root_folder}")
+        except Exception:
+            pass
+        self.set_scanning(False)
+
+    @QtCore.pyqtSlot(str, int)
+    def on_scan_error(self, message: str, gen: int):
+        if gen != getattr(self, "_scan_gen", 0):
+            return
+        self.set_scanning(False)
+        QtWidgets.QMessageBox.warning(self, "Scan error", message)
+
     def on_row_selected(self):
         idxs = self.ws_list.selectionModel().selectedIndexes()
         if not idxs:
             self.btn_open.setEnabled(False)
             return
-        idx = idxs[0]
-        ws = self.ws_model.workspace_at(idx.row())
+        pidx = idxs[0]
+        try:
+            sidx = self.ws_proxy.mapToSource(pidx)
+            ws = self.ws_model.workspace_at(sidx.row())
+        except Exception:
+            self.btn_open.setEnabled(False)
+            return
         self.lbl_name.setText(ws.name)
         self.lbl_path.setText(str(ws.path))
         self.txt_desc.setPlainText(ws.description or "")
@@ -465,7 +626,12 @@ class MainWindow(QtWidgets.QMainWindow):
         idxs = self.ws_list.selectionModel().selectedIndexes()
         if not idxs:
             return
-        ws = self.ws_model.workspace_at(idxs[0].row())
+        pidx = idxs[0]
+        try:
+            sidx = self.ws_proxy.mapToSource(pidx)
+            ws = self.ws_model.workspace_at(sidx.row())
+        except Exception:
+            return
         ok, msg = self._launch_code([str(ws.path)])
         self.status.showMessage(msg, 5000)
         if not ok:
