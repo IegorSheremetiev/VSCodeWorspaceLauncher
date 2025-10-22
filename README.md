@@ -26,6 +26,8 @@ A fast, friendly **entry point for VS Code**: recursively scans a root directory
   - Shortcuts: **Enter**=Open, **Ctrl+N**=Add, **Ctrl+F**=Focus search, **F5**=Rescan
   - Status bar shows native/fallback mode + scan progress counter
 
+<img width="1148" height="754" alt="image" src="https://github.com/user-attachments/assets/55b09950-8101-44f1-9fcc-1f06379937db" />
+
 ---
 
 ## Installation & Development Run
