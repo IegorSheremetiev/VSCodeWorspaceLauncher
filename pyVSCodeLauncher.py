@@ -45,6 +45,22 @@ except Exception:
 
 from platformdirs import user_config_dir
 
+from pathlib import Path
+import sys
+from PyQt6 import QtCore, QtGui, QtWidgets
+
+def _assets_base() -> Path:
+    # PyInstaller support (sys._MEIPASS)
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        return Path(sys._MEIPASS)  # type: ignore[attr-defined]
+    return Path(__file__).resolve().parent
+
+def _asset_path(name: str) -> str:
+    return str((_assets_base() / "assets" / name).resolve())
+
+APP_ICON_PNG = _asset_path("app.png")
+APP_TRAY_PNG = _asset_path("app_tray.png")
+# ----------------------------- Config -----------------------------
 APP_NAME = "vscode-workspace-launcher"
 ORG_NAME = "yegor-tools"
 CONFIG_DIR = Path(user_config_dir(APP_NAME, ORG_NAME))
@@ -382,11 +398,35 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("VSCode Workspace Launcher")
+
+        # App icon
+        try:
+            self.setWindowIcon(QtGui.QIcon(APP_ICON_PNG))
+        except Exception:
+            pass
+
         self.resize(1150, 720)
         self.settings = load_settings()
 
         # Status bar
         self.status = self.statusBar()
+
+        # Status icon
+        self.status_icon = QtWidgets.QLabel()
+        try:
+            pm = QtGui.QPixmap(APP_TRAY_PNG)
+            if not pm.isNull():
+                self.status_icon.setPixmap(
+                    pm.scaled(
+                        16, 16,
+                        QtCore.Qt.AspectRatioMode.KeepAspectRatio,
+                        QtCore.Qt.TransformationMode.SmoothTransformation
+                    )
+                )
+                self.status.addPermanentWidget(self.status_icon)
+        except Exception:
+            pass
+
         self.mode_label = QtWidgets.QLabel("")
         self.status.addPermanentWidget(self.mode_label)
         self.scan_progress = QtWidgets.QProgressBar(); self.scan_progress.setFixedWidth(150); self.scan_progress.setTextVisible(False); self.scan_progress.setVisible(False)
@@ -887,6 +927,12 @@ def main():
         pass
 
     app = QtWidgets.QApplication(sys.argv)
+    
+    # Set app icon
+    try:
+        app.setWindowIcon(QtGui.QIcon(APP_ICON_PNG)) 
+    except Exception:
+        pass 
 
     # Apply UI scale from stored settings at startup
     try:
