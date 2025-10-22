@@ -1,8 +1,12 @@
 {
-	"folders": [
-		{
-			"path": "."
-		}
-	],
-	"settings": {}
+  "folders": [
+    {
+      "path": "."
+    }
+  ],
+  "settings": {},
+  "meta": {
+    "description": "pyVSCodeLauncher",
+    "tags": []
+  }
 }
