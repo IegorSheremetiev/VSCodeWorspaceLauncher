@@ -8,7 +8,7 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: '3.11' }
       - run: pip install -r requirements.txt pyinstaller
-      - run: pyinstaller --noconsole --windowed --name "VSCodeWorkspaceLauncher" --icon assets\app.ico --add-data "assets;assets" pyVSCodeLauncher.py
+      - run: pyinstaller --noconsole --onefile --windowed --name "VSCodeWorkspaceLauncher" --icon assets\app.ico --add-data "assets;assets" pyVSCodeLauncher.py
       - uses: actions/upload-artifact@v4
         with: { name: windows-dist, path: dist/VSCodeWorkspaceLauncher/** }
 
@@ -19,6 +19,6 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: '3.11' }
       - run: pip install -r requirements.txt pyinstaller
-      - run: pyinstaller --noconsole --name "vscode-workspace-launcher" --icon assets/app.png --add-data "assets:assets" pyVSCodeLauncher.py
+      - run: pyinstaller --noconsole --onefile --name "vscode-workspace-launcher" --icon assets/app.png --add-data "assets:assets" pyVSCodeLauncher.py
       - uses: actions/upload-artifact@v4
         with: { name: linux-dist, path: dist/vscode-workspace-launcher/** }

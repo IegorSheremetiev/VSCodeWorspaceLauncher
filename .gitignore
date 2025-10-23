@@ -101,3 +101,5 @@ Thumbs.db
 # Bytecode from compiled launcher (if any)
 *.pyc
 
+# avoid .spec files to be monitored
+*.spec
