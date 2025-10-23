@@ -6,7 +6,7 @@
   ],
   "settings": {},
   "meta": {
-    "description": "pyVSCodeLauncher",
-    "tags": []
+    "description": "VSCode Workspace Launcher (PyQt6). \nA fast, friendly entry point for VS Code: recursively scans a root directory for *.code-workspace, gives you live search and quick filters, pin & MRU, and lets you open any folder directly in VS Code. Built with PyQt6. Cross‑platform. Async scanning. Clean UX.",
+    "tags": ["vscode", "code", "launcher", "workspace"]
   }
 }
